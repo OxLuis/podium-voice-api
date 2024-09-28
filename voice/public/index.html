@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Podium media test</title>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" integrity="sha384-2huaZvOR9iDzHqslqwpR87isEmrfxqyWOF7hr7BY6KG0+hVKLoEXMPUJw3ynWuhO" crossorigin="anonymous"></script>
+</head>
+<body>
+    <h1>Podium media test</h1>
+
+    <!-- Formulario para crear una sala -->
+    <div>
+        <h2>Crear Sala</h2>
+        <label for="new-room-name">Nombre de la Sala:</label>
+        <input type="text" id="new-room-name" placeholder="Nombre de la sala">
+        <br>
+        <label for="creator-username">Tu Nombre:</label>
+        <input type="text" id="creator-username" placeholder="Nombre del creador">
+        <br>
+        <button id="create-room">Crear Sala</button>
+    </div>
+
+    <!-- Formulario para unirse a una sala -->
+    <div>
+        <h2>Unirse a una Sala</h2>
+        <label for="username">Tu Nombre:</label>
+        <input type="text" id="username" placeholder="Nombre de usuario">
+        <br>
+        <label for="role">Rol:</label>
+        <select id="role">
+            <option value="participant">Participante</option>
+            <option value="moderator">Moderador</option>
+        </select>
+        <br>
+        <label for="join-room-name">Nombre de la Sala:</label>
+        <input type="text" id="join-room-name" disabled>
+        <br>
+        <button id="join-room" disabled>Unirse a la Sala</button>
+    </div>
+
+    <!-- Tabla para mostrar las salas disponibles -->
+    <div>
+        <h2>Salas Disponibles</h2>
+        <table id="rooms-table" border="1">
+            <thead>
+                <tr>
+                    <th>Nombre de la Sala</th>
+                    <th>Participantes</th>
+                    <th>Roles</th>
+                    <th>Acción</th>
+                </tr>
+            </thead>
+            <tbody>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Log -->
+    <div>
+        <h2>Log</h2>
+        <div id="log" style="height: 200px; overflow-y: auto; border: 1px solid black;"></div>
+    </div>
+
+    <!-- Script para manejar la lógica del cliente -->
+    <script>
+
+        
+
+        const socket = io('https://4baf-190-128-234-54.ngrok-free.app');
+
+        let localStream;
+        let peerConnections = {};
+
+        navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+        .then(stream => {
+            localStream = stream;
+            const localVideo = document.createElement('video');
+            localVideo.srcObject = stream;
+            localVideo.autoplay = true;
+            document.body.appendChild(localVideo);
+        })
+        .catch(error => {
+            console.error('Error al acceder a la cámara o micrófono:', error);
+        }); 
+
+   
+
+
+        const log = document.getElementById('log');
+
+        const roomsTable = document.getElementById('rooms-table').querySelector('tbody');
+        const joinRoomButton = document.getElementById('join-room');
+        const joinRoomNameInput = document.getElementById('join-room-name');
+
+        // Crear una nueva sala
+        document.getElementById('create-room').onclick = () => {
+            const roomName = document.getElementById('new-room-name').value;
+            const username = document.getElementById('creator-username').value;
+            socket.emit('create-room', roomName, username);
+        };
+
+        socket.on('room-created', ({ roomName, username }) => {
+            appendLog(`Sala ${roomName} creada por ${username}`);
+            loadRooms();
+        });
+
+        // Cargar salas disponibles
+        function loadRooms() {
+            fetch('/rooms')
+                .then(response => response.json())
+                .then(rooms => {
+                    roomsTable.innerHTML= ''; 
+                    rooms.forEach(room => { 
+                        const row = document.createElement('tr'); 
+                        row.innerHTML = `<td>${room.roomName}</td><td>${room.participantCount}</td><td>${room.participants.map(p => p.username + " (" + p.role + ")").join(", ")}</td><td><button onclick="joinRoom('${room.roomName}')">Unirse</button></td>`;
+                        roomsTable.appendChild(row);
+                    });
+                });
+        }
+
+        // Unirse a una sala
+        function joinRoom(roomName) {
+            const username = document.getElementById('username').value;
+            const role = document.getElementById('role').value;
+            joinRoomNameInput.value = roomName;
+            joinRoomButton.disabled = false;
+            joinRoomButton.onclick = () => {
+                socket.emit('join-room', { roomName, username, role });
+            };
+        }
+
+        // Manejar datos de sala
+        socket.on('room-data', ({ roomName, participants }) => {
+            appendLog(`Te has unido a la sala ${roomName}. Participantes: ${participants.map(p => p.username).join(", ")}`);
+            loadRooms();
+        });
+
+        function createPeerConnection(roomName, socketId) {
+            const peerConnection = new RTCPeerConnection({
+                iceServers: [
+                    {'urls': 'stun:stun.services.mozilla.com'},
+                    {'urls': 'stun:stun.l.google.com:19302'},
+                ]
+            });
+
+            peerConnections[socketId] = peerConnection;
+
+            // Agregar solo el stream de audio
+            localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+            // Manejar la señalización de WebRTC
+            peerConnection.onicecandidate = event => {
+                if (event.candidate) {
+                    socket.emit('webrtc-signal', {
+                        roomName,
+                        signal: { candidate: event.candidate },
+                        targetId: socketId
+                    });
+                }
+            };
+
+            peerConnection.ontrack = event => {
+                // Manejar el stream de audio remoto
+                const remoteAudio = new Audio();
+                remoteAudio.srcObject = event.streams[0];
+                remoteAudio.autoplay = true;
+                document.body.appendChild(remoteAudio);
+            };
+
+            return peerConnection;
+        }
+
+            // Manejar la señal de WebRTC
+            socket.on('webrtc-signal', async ({ signal, senderId }) => {
+                let peerConnection = peerConnections[senderId];
+
+                if (!peerConnection) {
+                    peerConnection = createPeerConnection(roomName, senderId);
+                }
+
+                // Manejar la señal SDP
+                if (signal.sdp) {
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+
+                    if (signal.sdp.type === 'offer') {
+                        const answer = await peerConnection.createAnswer();
+                        await peerConnection.setLocalDescription(answer);
+                        socket.emit('webrtc-signal', {
+                            roomName,
+                            signal: { sdp: peerConnection.localDescription },
+                            targetId: senderId
+                        });
+                    }
+                }
+
+                // Solo añadir candidatos si la descripción remota está configurada
+                if (signal.candidate && peerConnection.remoteDescription) {
+                    try {
+                        await peerConnection.addIceCandidate(new RTCIceCandidate(signal.candidate));
+                    } catch (error) {
+                        console.error('Error al añadir el candidato ICE:', error);
+                    }
+                } else {
+                    console.warn('Candidato ICE recibido antes de que se estableciera la descripción remota.');
+                }
+            });
+
+
+            // Crear la oferta de WebRTC cuando alguien se une a la sala
+            socket.on('room-data', ({ roomName, participants }) => {
+                participants.forEach(participant => {
+                    if (participant.id !== socket.id) {
+                        const peerConnection = createPeerConnection(roomName, participant.id);
+
+                        peerConnection.createOffer()
+                        .then(offer => peerConnection.setLocalDescription(offer))
+                        .then(() => {
+                            socket.emit('webrtc-signal', {
+                                roomName,
+                                signal: { sdp: peerConnection.localDescription },
+                                targetId: participant.id
+                            });
+                        });
+                    }
+                });
+            });
+
+
+        // Manejar error
+        socket.on('error', message => {
+            appendLog(`Error: ${message}`);
+        });
+
+        // Manejar log
+        function appendLog(message) {
+            const timeStamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
+            log.innerHTML += `[${timeStamp}] ${message}<br>`;
+            log.scrollTop = log.scrollHeight;
+        }
+
+        // Cargar salas al inicio
+        loadRooms();
+
+
+        
+
+    </script>
+
+<script>
+   navigator.mediaDevices.getUserMedia({ audio: true })
+  .then(stream => {
+      localStream = stream;
+      console.log('Micrófono accesible');
+  })
+  .catch(error => {
+      console.error('Error al acceder al micrófono:', error.name, error.message);
+  });
+
+    </script>
+</body>
+</html>
